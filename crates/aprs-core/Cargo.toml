@@ -1,0 +1,9 @@
+[package]
+name = "aprs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core APRS data model and data-type detection (no_std)"
+
+[dependencies]

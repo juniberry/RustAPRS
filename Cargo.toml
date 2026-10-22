@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aprs-core",
+    "crates/aprs-decoders",
+    "crates/aprs-ax25",
+    "crates/aprs-is",
+    "crates/aprs-capture",
+    "crates/aprs-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://example.invalid/RustAPRS"
+authors = ["RustAPRS contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = true
+codegen-units = 1

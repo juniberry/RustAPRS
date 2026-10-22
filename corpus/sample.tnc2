@@ -1,0 +1,47 @@
+# APRS-IS TNC2 monitor-format sample corpus.
+#
+# One packet per line. Blank lines and lines starting with '#' are ignored.
+# These are representative, printable-safe examples covering the v1 data types.
+# Binary-heavy packets (some Mic-E encodings) are better captured by the
+# aprs-capture tool against a live APRS-IS feed.
+
+# Uncompressed position, no timestamp, no messaging
+N0CALL-9>APRS,WIDE1-1,WIDE2-1:!4903.50N/07201.75W-Test 001234
+# Uncompressed position, no timestamp, messaging capable
+K7ABC-1>APRS,TCPIP*:=4717.44N/12220.61W-PHG5130/Test station
+# Position with UTC timestamp
+W1AW>APRS:/092345z4903.50N/07201.75W-Somewhere
+# Position with timestamp, messaging capable
+N0CALL>APRS:@092345z4903.50N/07201.75W-Msg station
+# Southern/western hemisphere
+N0CALL-5>APRS:!3327.50S/07043.00W-Santiago
+# Compressed position
+N0CALL-7>APRS:!/5L!!<*e7>7P[
+# Mic-E position (destination encodes latitude)
+N0CALL-7>S32UVT:'(_fn"Oj/
+# Message
+N0CALL>APRS::BLN1     :test message{123
+# Message acknowledgement
+N0CALL>APRS::N0CALL   :ack{123
+# Object (live, with position)
+N0CALL>APRS:;OBJECT   *111111z4903.50N/07201.75WrTest
+# Object (killed)
+N0CALL>APRS:;OBJECT   _111111z_Gone
+# Item
+N0CALL>APRS:)ITEM!4903.50N/07201.75Wr
+# Status
+N0CALL>APRS:>Hello from the field
+# Telemetry
+N0CALL>APRS:T#005,199,000,255,073,123,01101001
+# Weather (positionless, with timestamp)
+N0CALL-13>APRS:_100905zc220s004g005t077r000p000P000h50b10135
+# Station capability
+N0CALL>APRS:<IGATE,MSG_CNT=1
+# Query
+N0CALL>APRS:?APRS?
+# Maidenhead grid locator
+N0CALL>APRS:[FN20wa]
+# Third-party traffic
+N0CALL>APRS:}W1AW>APRS:>relayed status
+# User-defined
+N0CALL>APRS:{USERDEF
