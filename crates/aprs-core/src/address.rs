@@ -125,6 +125,15 @@ impl fmt::Debug for Address {
     }
 }
 
+impl Default for Address {
+    fn default() -> Self {
+        Address {
+            callsign: [b' '; CALLSIGN_LEN],
+            ssid: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

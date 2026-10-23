@@ -8,3 +8,7 @@ description = "AX.25 frame layer: FCS and addressing (no_std)"
 
 [dependencies]
 aprs-core = { path = "../aprs-core" }
+
+[dev-dependencies]
+aprs-decoders = { path = "../aprs-decoders" }
+aprs-encoders = { path = "../aprs-encoders" }

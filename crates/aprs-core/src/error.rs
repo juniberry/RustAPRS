@@ -21,6 +21,8 @@ pub enum Error {
     InvalidBase91,
     /// The output buffer was too small to hold the encoded data.
     BufferTooSmall,
+    /// The frame check sequence did not match the frame contents.
+    InvalidFcs,
     /// The frame was recognized but this decoder does not support it (yet).
     Unsupported,
 }
@@ -36,6 +38,7 @@ impl fmt::Display for Error {
             Error::InvalidNumber => write!(f, "invalid numeric field"),
             Error::InvalidBase91 => write!(f, "invalid base-91 character"),
             Error::BufferTooSmall => write!(f, "output buffer too small"),
+            Error::InvalidFcs => write!(f, "frame check sequence mismatch"),
             Error::Unsupported => write!(f, "recognized but unsupported"),
         }
     }
