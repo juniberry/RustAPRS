@@ -142,8 +142,9 @@ pub fn decode<'a>(destination_raw: &[u8], info: &'a [u8]) -> Result<Position<'a>
     let symbol_table = SymbolTable::from_byte(body[7]);
 
     // The remainder is status text: an optional device/messaging prefix, an
-    // optional base-91 altitude, an optional Maidenhead locator, and free text.
-    let (comment, messaging, altitude_feet, maidenhead) = parse_status_text(&body[8..]);
+    // optional base-91 altitude, an optional Maidenhead locator, and free text,
+    // with an optional trailing device identifier suffix.
+    let status = parse_status_text(&body[8..]);
 
     Ok(Position {
         coordinates: Coordinates {
@@ -153,26 +154,36 @@ pub fn decode<'a>(destination_raw: &[u8], info: &'a [u8]) -> Result<Position<'a>
         encoding: PositionEncoding::MicE,
         symbol_table,
         symbol_code,
-        comment,
+        comment: status.comment,
         timestamp: None,
         ambiguity,
-        messaging,
+        messaging: status.messaging,
+        device: status.device,
         course: Some(course as u16),
         speed_knots: Some(speed as u16),
-        altitude_feet,
+        altitude_feet: status.altitude_feet,
         phg: None,
         radio_range_miles: None,
         compression_type: None,
-        maidenhead,
+        maidenhead: status.maidenhead,
     })
+}
+
+/// The parsed components of a Mic-E status text field.
+struct StatusText<'a> {
+    comment: &'a [u8],
+    messaging: bool,
+    altitude_feet: Option<i32>,
+    maidenhead: Option<Maidenhead>,
+    device: Option<&'a [u8]>,
 }
 
 /// Parse the Mic-E status text (everything after the symbol table identifier).
 ///
-/// Returns `(comment, messaging, altitude_feet, maidenhead)`. The leading
-/// device/messaging prefix, the optional `xxx}` base-91 altitude, and the
-/// optional Maidenhead locator are removed from the comment.
-fn parse_status_text(text: &[u8]) -> (&[u8], bool, Option<i32>, Option<Maidenhead>) {
+/// The leading device/messaging prefix, the optional `xxx}` base-91 altitude,
+/// the optional Maidenhead locator, and the trailing device identifier suffix
+/// are removed from the comment.
+fn parse_status_text(text: &[u8]) -> StatusText<'_> {
     let mut rest = text;
     let mut messaging = false;
 
@@ -213,7 +224,38 @@ fn parse_status_text(text: &[u8]) -> (&[u8], bool, Option<i32>, Option<Maidenhea
         rest = r;
     }
 
-    (rest, messaging, altitude_feet, maidenhead)
+    // Device identifier suffix (e.g. `|3`, `_0`, `=`).
+    let (comment, device) = strip_device_suffix(rest);
+
+    StatusText {
+        comment,
+        messaging,
+        altitude_feet,
+        maidenhead,
+        device,
+    }
+}
+
+/// Known Mic-E device identifier suffixes, as listed in APRS 1.2c §10. The
+/// full, maintained table lives in the `aprs-deviceid` project; this covers the
+/// common trackers and radios described in the spec.
+const DEVICE_SUFFIXES_2: [&[u8]; 5] = [b"_(", b"_0", b"_3", b"|3", b"|4"];
+const DEVICE_SUFFIXES_1: [&[u8]; 3] = [b"=", b"^", b"&"];
+
+/// Strip a known device identifier suffix from the end of the status text,
+/// returning the remaining comment and the device bytes (or `None`).
+fn strip_device_suffix(text: &[u8]) -> (&[u8], Option<&[u8]>) {
+    for suffix in DEVICE_SUFFIXES_2 {
+        if text.ends_with(suffix) {
+            return (&text[..text.len() - suffix.len()], Some(suffix));
+        }
+    }
+    for suffix in DEVICE_SUFFIXES_1 {
+        if text.ends_with(suffix) {
+            return (&text[..text.len() - suffix.len()], Some(suffix));
+        }
+    }
+    (text, None)
 }
 
 /// Decode a single destination-address byte into a latitude digit.
@@ -325,5 +367,17 @@ mod tests {
         let p = decode(dest, info).unwrap();
         assert!(!p.messaging);
         assert_eq!(p.comment, b"Hello");
+    }
+
+    #[test]
+    fn status_text_device_suffix() {
+        // Byonics TinyTrack 3: ' prefix (no messaging) + altitude + `|3` suffix.
+        let dest = b"S32UVT";
+        let info = b"'(_fn\"Oj/'\"4T}hello|3";
+        let p = decode(dest, info).unwrap();
+        assert!(!p.messaging);
+        assert_eq!(p.altitude_feet, Some(200));
+        assert_eq!(p.device, Some(&b"|3"[..]));
+        assert_eq!(p.comment, b"hello");
     }
 }

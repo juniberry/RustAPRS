@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aprs_ax25::{decode_frame, decode_kiss_payload, encode_kiss, CMD_RETURN, FEND};
+use aprs_ax25::{decode_frame_no_fcs, decode_kiss_payload, encode_kiss, CMD_RETURN, FEND};
+use aprs_core::packet::Packet;
+use aprs_decoders::decode_packet;
 use aprs_is::{passcode, Client};
 use clap::Parser;
 
@@ -26,9 +28,10 @@ struct Args {
     #[arg(long, default_value = "rotate.aprs2.net:14580")]
     server: String,
 
-    /// Callsign to log in with (uppercased automatically).
+    /// Callsign to log in with (uppercased automatically). Required for
+    /// APRS-IS collection; not needed for `--serial` mode.
     #[arg(long)]
-    callsign: String,
+    callsign: Option<String>,
 
     /// APRS-IS passcode; computed from the callsign when omitted.
     #[arg(long)]
@@ -86,7 +89,13 @@ async fn main() {
         return;
     }
 
-    let callsign = args.callsign.to_ascii_uppercase();
+    let callsign = match args.callsign.as_deref() {
+        Some(c) => c.to_ascii_uppercase(),
+        None => {
+            eprintln!("error: --callsign is required for APRS-IS collection");
+            std::process::exit(1);
+        }
+    };
     let pass = args.passcode.unwrap_or_else(|| passcode(&callsign));
 
     // Build the filter: an explicit raw filter if given, otherwise a radial
@@ -260,7 +269,19 @@ fn serial_capture(args: &Args, port_path: &str) {
                     if b == FEND {
                         if in_frame {
                             if !payload.is_empty() {
-                                if let Some(tnc2) = decode_payload_to_tnc2(&payload) {
+                                if args.debug {
+                                    let cmd = payload.first().copied().unwrap_or(0);
+                                    eprintln!(
+                                        "kiss cmd=0x{cmd:02x}, {} byte(s):",
+                                        payload.len() - 1
+                                    );
+                                    eprint!("{}", hex_dump(&payload[1..]));
+                                }
+                                if let Some((tnc2, decoded)) = decode_payload(&payload, args.debug)
+                                {
+                                    if let Some(d) = decoded {
+                                        eprintln!("{d}");
+                                    }
                                     let mut hasher =
                                         std::collections::hash_map::DefaultHasher::new();
                                     tnc2.hash(&mut hasher);
@@ -268,12 +289,6 @@ fn serial_capture(args: &Args, port_path: &str) {
                                         file.write_all(&tnc2).expect("write frame");
                                         file.write_all(b"\n").expect("write newline");
                                         collected += 1;
-                                        if collected == 1 {
-                                            eprintln!(
-                                                "first packet: {}",
-                                                String::from_utf8_lossy(&tnc2)
-                                            );
-                                        }
                                         if collected.is_multiple_of(args.shard_size) {
                                             shard_index += 1;
                                             file = open_shard(&args.out_dir, shard_index);
@@ -282,6 +297,8 @@ fn serial_capture(args: &Args, port_path: &str) {
                                             eprintln!("collected {collected} packets");
                                         }
                                     }
+                                } else if args.debug {
+                                    eprintln!("  (not a decodable data frame)");
                                 }
                             }
                             payload.clear();
@@ -328,19 +345,38 @@ fn serial_capture(args: &Args, port_path: &str) {
 }
 
 /// Decode a KISS payload (`COMMAND DATA`) into a TNC2 line, or `None` for a
-/// non-data frame or a decode failure.
-fn decode_payload_to_tnc2(payload: &[u8]) -> Option<Vec<u8>> {
+/// non-data frame or a decode failure. When `debug` is set, also returns a
+/// human-readable decode of the APRS payload for logging.
+fn decode_payload(payload: &[u8], debug: bool) -> Option<(Vec<u8>, Option<String>)> {
     let mut ax25 = [0u8; 512];
     let (cmd, len) = decode_kiss_payload(payload, &mut ax25).ok()?;
     if cmd != aprs_ax25::CMD_DATA {
         return None;
     }
-    let frame = decode_frame(&ax25[..len]).ok()?;
-    Some(frame_to_tnc2(&frame))
+    let frame = decode_frame_no_fcs(&ax25[..len]).ok()?;
+    let tnc2 = frame_to_tnc2(&frame);
+
+    let decoded = if debug {
+        let packet = Packet::new(
+            frame.source,
+            frame.destination,
+            &frame.destination.callsign,
+            frame.info,
+        );
+        let info = match decode_packet(&packet) {
+            Ok(d) => aprs_format::format_decoded(d),
+            Err(e) => format!("<decode error: {e}>"),
+        };
+        Some(format!("{}: {}", frame_header(&frame), info))
+    } else {
+        None
+    };
+
+    Some((tnc2, decoded))
 }
 
-/// Render an AX.25 frame as a TNC2 monitor-format line (`SRC>DST,DIGI:INFO`).
-fn frame_to_tnc2(frame: &aprs_ax25::Frame<'_>) -> Vec<u8> {
+/// Build the `SRC>DST,DIGI1,DIGI2` header of a TNC2 line.
+fn frame_header(frame: &aprs_ax25::Frame<'_>) -> String {
     let mut s = String::new();
     s.push_str(&frame.source.to_string());
     s.push('>');
@@ -349,9 +385,47 @@ fn frame_to_tnc2(frame: &aprs_ax25::Frame<'_>) -> Vec<u8> {
         s.push(',');
         s.push_str(&digi.to_string());
     }
+    s
+}
+
+/// Render an AX.25 frame as a TNC2 monitor-format line (`SRC>DST,DIGI:INFO`).
+fn frame_to_tnc2(frame: &aprs_ax25::Frame<'_>) -> Vec<u8> {
+    let mut s = frame_header(frame);
     s.push(':');
     s.push_str(&String::from_utf8_lossy(frame.info));
     s.into_bytes()
+}
+
+/// Render `bytes` as a classic hex dump: offset, two 8-byte hex columns, and an
+/// ASCII gutter.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        out.push_str(&format!("{:04x}  ", i * 16));
+        for j in 0..16 {
+            if j == 8 {
+                out.push(' ');
+            }
+            if j < chunk.len() {
+                out.push_str(&format!("{:02x} ", chunk[j]));
+            } else {
+                out.push_str("   ");
+            }
+        }
+        out.push_str(" |");
+        for &b in chunk {
+            out.push(if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            });
+        }
+        for _ in chunk.len()..16 {
+            out.push(' ');
+        }
+        out.push_str("|\n");
+    }
+    out
 }
 
 #[cfg(test)]

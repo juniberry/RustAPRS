@@ -4,7 +4,9 @@
 //! `aprs-decoders`: a payload is encoded, assembled into an AX.25 frame,
 //! disassembled, and decoded back to the original typed value.
 
-use aprs_ax25::{decode_frame, encode_frame, Frame, MAX_DIGIPEATERS};
+use aprs_ax25::{
+    decode_frame, decode_frame_no_fcs, encode_frame, encode_frame_no_fcs, Frame, MAX_DIGIPEATERS,
+};
 use aprs_core::address::Address;
 use aprs_core::packet::Packet;
 use aprs_decoders::{decode_packet, Decoded, PositionEncoding};
@@ -147,9 +149,10 @@ fn kiss_encapsulated_roundtrip() {
     };
 
     let mut ax25 = [0u8; 128];
-    let ax25_len = encode_frame(&frame, &mut ax25).unwrap();
+    let ax25_len = encode_frame_no_fcs(&frame, &mut ax25).unwrap();
 
-    // Wrap in KISS, then unwrap.
+    // Wrap in KISS, then unwrap. A KISS TNC adds/strips the FCS, so the KISS
+    // payload carries the frame without it.
     let mut wire = [0u8; 256];
     let wire_len =
         aprs_ax25::encode_kiss(aprs_ax25::CMD_DATA, &ax25[..ax25_len], &mut wire).unwrap();
@@ -157,7 +160,7 @@ fn kiss_encapsulated_roundtrip() {
     let (cmd, ax25_2_len) = aprs_ax25::decode_kiss(&wire[..wire_len], &mut ax25_2).unwrap();
     assert_eq!(cmd, aprs_ax25::CMD_DATA);
 
-    let decoded = decode_frame(&ax25_2[..ax25_2_len]).unwrap();
+    let decoded = decode_frame_no_fcs(&ax25_2[..ax25_2_len]).unwrap();
     match decode_frame_info(&decoded) {
         Decoded::Position(p) => {
             assert!((p.coordinates.latitude - 49.0583).abs() < 1e-4);

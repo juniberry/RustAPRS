@@ -153,6 +153,9 @@ pub struct Position<'a> {
     pub ambiguity: u8,
     /// True when the originating station supports APRS messaging.
     pub messaging: bool,
+    /// Raw device identifier suffix (e.g. `|3`, `_0`, `=`) stripped from the
+    /// Mic-E status text, when a known suffix was recognized.
+    pub device: Option<&'a [u8]>,
     /// Course over ground in degrees, when available (Mic-E / compressed / CSE).
     pub course: Option<u16>,
     /// Speed in knots, when available.

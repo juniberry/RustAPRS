@@ -10,6 +10,11 @@
 //! The `H` bit of each 7-octet address marks the final address in the field.
 //! The two-octet FCS (CRC-16/CCITT-FALSE) is transmitted least-significant
 //! byte first.
+//!
+//! KISS is the exception: a KISS TNC computes/verifies the FCS itself and strips
+//! it from frames it hands to the host, so the KISS payload carries the frame
+//! *without* the FCS. Use [`encode_frame_no_fcs`]/[`decode_frame_no_fcs`] for
+//! that path, and [`encode_frame`]/[`decode_frame`] for raw AX.25/HDLC frames.
 
 use aprs_core::address::Address;
 use aprs_core::Error;
@@ -44,13 +49,32 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// Encode a [`Frame`] into `out`, returning the number of bytes written.
+/// Encode a [`Frame`] into `out` *with* the two-octet FCS appended, returning
+/// the number of bytes written. Use this for a raw AX.25/HDLC frame.
 pub fn encode_frame(frame: &Frame<'_>, out: &mut [u8]) -> Result<usize, Error> {
+    let pos = encode_frame_body(frame, out)?;
+    if out.len() < pos + 2 {
+        return Err(Error::BufferTooSmall);
+    }
+    let crc = fcs(&out[..pos]);
+    out[pos..pos + 2].copy_from_slice(&crc.to_le_bytes());
+    Ok(pos + 2)
+}
+
+/// Encode a [`Frame`] into `out` *without* the FCS, returning the number of
+/// bytes written. This is the payload carried in a KISS data frame: the TNC
+/// appends the FCS on transmit.
+pub fn encode_frame_no_fcs(frame: &Frame<'_>, out: &mut [u8]) -> Result<usize, Error> {
+    encode_frame_body(frame, out)
+}
+
+/// Write the address/control/PID/info portion of a frame (no FCS).
+fn encode_frame_body(frame: &Frame<'_>, out: &mut [u8]) -> Result<usize, Error> {
     if frame.digi_count > MAX_DIGIPEATERS {
         return Err(Error::InvalidCharacter);
     }
 
-    let size = 7 + 7 + 7 * frame.digi_count + 2 + frame.info.len() + 2;
+    let size = 7 + 7 + 7 * frame.digi_count + 2 + frame.info.len();
     if out.len() < size {
         return Err(Error::BufferTooSmall);
     }
@@ -79,14 +103,10 @@ pub fn encode_frame(frame: &Frame<'_>, out: &mut [u8]) -> Result<usize, Error> {
     out[pos..pos + frame.info.len()].copy_from_slice(frame.info);
     pos += frame.info.len();
 
-    let crc = fcs(&out[..pos]);
-    out[pos..pos + 2].copy_from_slice(&crc.to_le_bytes());
-    pos += 2;
-
     Ok(pos)
 }
 
-/// Decode a complete frame from `bytes`, verifying the FCS.
+/// Decode a complete frame from `bytes` *with* the FCS, verifying it.
 pub fn decode_frame(bytes: &[u8]) -> Result<Frame<'_>, Error> {
     // Minimum: dest(7) + source(7) + control(1) + pid(1) + fcs(2).
     if bytes.len() < 18 {
@@ -94,6 +114,24 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame<'_>, Error> {
     }
     if !fcs_valid(bytes) {
         return Err(Error::InvalidFcs);
+    }
+    decode_frame_body(&bytes[..bytes.len() - 2])
+}
+
+/// Decode a frame *without* the FCS, as carried in a KISS data frame.
+///
+/// A KISS TNC verifies the AX.25 FCS and strips it before handing the frame to
+/// the host, so the KISS payload is `DST SRC [DIGI]* CTRL PID INFO` with no
+/// trailing FCS. This is the decode counterpart to [`encode_frame_no_fcs`].
+pub fn decode_frame_no_fcs(bytes: &[u8]) -> Result<Frame<'_>, Error> {
+    decode_frame_body(bytes)
+}
+
+/// Decode the address/control/PID/info portion of a frame (no FCS).
+fn decode_frame_body(bytes: &[u8]) -> Result<Frame<'_>, Error> {
+    // Minimum: dest(7) + source(7) + control(1) + pid(1).
+    if bytes.len() < 16 {
+        return Err(Error::Truncated);
     }
 
     let mut pos = 0;
@@ -118,7 +156,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame<'_>, Error> {
     }
     pos += 2;
 
-    let info = &bytes[pos..bytes.len() - 2];
+    let info = &bytes[pos..];
 
     Ok(Frame {
         destination,
@@ -205,5 +243,36 @@ mod tests {
     #[test]
     fn rejects_too_short() {
         assert_eq!(decode_frame(b"short"), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn no_fcs_roundtrip() {
+        let mut digis = [Address::default(); MAX_DIGIPEATERS];
+        digis[0] = addr(b"WIDE1", 1);
+        let frame = Frame {
+            destination: addr(b"APRS", 0),
+            source: addr(b"N0CALL", 0),
+            digipeaters: digis,
+            digi_count: 1,
+            info: b"!4903.50N/07201.75W-",
+        };
+
+        // The no-FCS body is exactly the full frame minus the trailing 2 FCS bytes.
+        let mut full = [0u8; 128];
+        let full_n = encode_frame(&frame, &mut full).unwrap();
+        let mut body = [0u8; 128];
+        let body_n = encode_frame_no_fcs(&frame, &mut body).unwrap();
+        assert_eq!(body_n + 2, full_n);
+        assert_eq!(&body[..body_n], &full[..body_n]);
+
+        let decoded = decode_frame_no_fcs(&body[..body_n]).unwrap();
+        assert_eq!(decoded.source, frame.source);
+        assert_eq!(decoded.digipeaters()[0], addr(b"WIDE1", 1));
+        assert_eq!(decoded.info, frame.info);
+    }
+
+    #[test]
+    fn decode_frame_no_fcs_rejects_short() {
+        assert_eq!(decode_frame_no_fcs(b"short"), Err(Error::Truncated));
     }
 }
