@@ -1,0 +1,13 @@
+[package]
+name = "aprs-encoders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "APRS payload encoders (no_std)"
+
+[dependencies]
+aprs-core = { path = "../aprs-core" }
+
+[dev-dependencies]
+aprs-decoders = { path = "../aprs-decoders" }

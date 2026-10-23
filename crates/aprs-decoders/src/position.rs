@@ -3,7 +3,11 @@
 use aprs_core::base91::{base91_decode, base91_digit};
 use aprs_core::Error;
 
-use crate::decoded::{Coordinates, Position, PositionEncoding, SymbolTable, Timestamp};
+use crate::data_extension;
+use crate::decoded::{
+    CompressionOrigin, CompressionType, Coordinates, NmeaSource, Position, PositionEncoding,
+    SymbolTable, Timestamp,
+};
 use crate::parse::{degrees_minutes, digits};
 
 /// Minimum body length (after the data-type byte) for an uncompressed position
@@ -140,6 +144,7 @@ pub fn decode_uncompressed(
     }
 
     let symbol_table = SymbolTable::from_byte(body[8]);
+    let (ext, comment) = data_extension::parse(&body[19..]);
 
     Ok(Position {
         coordinates: Coordinates {
@@ -149,13 +154,17 @@ pub fn decode_uncompressed(
         encoding: PositionEncoding::Uncompressed,
         symbol_table,
         symbol_code: body[18],
-        comment: &body[19..],
+        comment,
         timestamp,
         ambiguity: lat_blank.max(lon_blank),
         messaging,
-        course: None,
-        speed_knots: None,
+        course: ext.course,
+        speed_knots: ext.speed_knots,
         altitude_feet: None,
+        phg: ext.phg,
+        radio_range_miles: ext.radio_range_miles,
+        compression_type: None,
+        maidenhead: None,
     })
 }
 
@@ -176,32 +185,58 @@ pub fn decode_compressed(
     let symbol_code = body[9];
     let c = body[10];
     let s = body[11];
-    let t = body[12];
+    let t_val = (body[12] as i32 - 33).max(0) as u8;
 
     let latitude = 90.0 - lat_enc as f64 / 380926.0;
     let longitude = -180.0 + lon_enc as f64 / 190463.0;
 
+    // The compression-type (T) byte is not meaningful when `c` is a space.
+    let compression_type = (c != b' ').then_some(CompressionType {
+        gps_fix_current: t_val & 0x20 != 0,
+        nmea_source: match (t_val >> 3) & 0x3 {
+            0 => NmeaSource::Other,
+            1 => NmeaSource::Gll,
+            2 => NmeaSource::Gga,
+            _ => NmeaSource::Rmc,
+        },
+        origin: match t_val & 0x7 {
+            0 => CompressionOrigin::Compressed,
+            1 => CompressionOrigin::TncBText,
+            2 => CompressionOrigin::Software,
+            3 => CompressionOrigin::Tbd,
+            4 => CompressionOrigin::Kpc3,
+            5 => CompressionOrigin::Pico,
+            6 => CompressionOrigin::OtherTracker,
+            _ => CompressionOrigin::Digipeater,
+        },
+    });
+
     // The cs bytes encode course/speed, pre-calculated radio range, or
     // altitude. `c == ' '` means none of these are present.
-    let (course, speed_knots, altitude_feet) = if c == b' ' {
-        (None, None, None)
+    let (course, speed_knots, altitude_feet, cs_range) = if c == b' ' {
+        (None, None, None, None)
     } else if c == b'{' {
         // '{' (base-91 value 90): compressed radio range (range = 2 * 1.08^s).
-        (None, None, None)
-    } else if (t & 0x18) == 0x10 {
+        let s_val = base91_digit(s).ok_or(Error::InvalidBase91)? as i32;
+        (None, None, None, Some((2.0 * exp(1.08, s_val)) as u16))
+    } else if (t_val & 0x18) == 0x10 {
         // GGA sentence: cs carries altitude = 1.002^(c*91+s) feet.
         let c_val = base91_digit(c).ok_or(Error::InvalidBase91)? as i32;
         let s_val = base91_digit(s).ok_or(Error::InvalidBase91)? as i32;
         let cs = c_val * 91 + s_val;
-        (None, None, Some(exp(1.002, cs) as i32))
+        (None, None, Some(exp(1.002, cs) as i32), None)
     } else {
         // Course/speed: course = c*4, speed = 1.08^s - 1 (c in 0..89).
         let c_val = base91_digit(c).ok_or(Error::InvalidBase91)?;
         let s_val = base91_digit(s).ok_or(Error::InvalidBase91)?;
         let course = (c_val != 0).then(|| (c_val * 4) as u16);
         let speed = (s_val != 0).then(|| (exp(1.08, s_val as i32) - 1.0) as u16);
-        (course, speed, None)
+        (course, speed, None, None)
     };
+
+    // Data extensions (PHG, RNG, CSE/SPD) may follow the compressed field.
+    let (ext, comment) = data_extension::parse(&body[13..]);
+    let radio_range_miles = cs_range.or(ext.radio_range_miles);
 
     Ok(Position {
         coordinates: Coordinates {
@@ -211,13 +246,17 @@ pub fn decode_compressed(
         encoding: PositionEncoding::Compressed,
         symbol_table,
         symbol_code,
-        comment: &body[13..],
+        comment,
         timestamp,
         ambiguity: 0,
         messaging,
         course,
         speed_knots,
         altitude_feet,
+        phg: ext.phg,
+        radio_range_miles,
+        compression_type,
+        maidenhead: None,
     })
 }
 
@@ -322,5 +361,25 @@ mod tests {
             })
         );
         assert_eq!(p.symbol_code, b'-');
+    }
+
+    #[test]
+    fn compressed_gga_altitude_and_type() {
+        // Spec example: GGA sentence, altitude = 1.002^(c*91+s) = 10004 ft.
+        let p = decode(b"=/5L!!<*e7OS]S").unwrap();
+        assert_eq!(p.altitude_feet, Some(10004));
+        let ct = p.compression_type.unwrap();
+        assert!(ct.gps_fix_current);
+        assert_eq!(ct.nmea_source, NmeaSource::Gga);
+        assert_eq!(ct.origin, CompressionOrigin::Software);
+    }
+
+    #[test]
+    fn compressed_radio_range() {
+        // Spec example: c = '{', range = 2 * 1.08^s ≈ 20 miles.
+        let p = decode(b"=/5L!!<*e7>{?!").unwrap();
+        assert_eq!(p.radio_range_miles, Some(20));
+        assert_eq!(p.course, None);
+        assert_eq!(p.speed_knots, None);
     }
 }

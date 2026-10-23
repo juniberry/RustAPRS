@@ -7,18 +7,23 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod data_extension;
 pub mod decoded;
+pub mod maidenhead;
 pub mod message;
 pub mod mice;
 pub mod object;
 pub mod parse;
 pub mod position;
+pub mod status;
 pub mod telemetry;
+pub mod thirdparty;
 pub mod weather;
 
 pub use decoded::{
-    Coordinates, Decoded, Message, Object, Position, PositionEncoding, SymbolTable, Telemetry,
-    TelemetrySequence, Timestamp, Weather,
+    CompressionOrigin, CompressionType, Coordinates, Decoded, Maidenhead, Message, NmeaSource,
+    Object, Phg, Position, PositionEncoding, Status, SymbolTable, Telemetry, TelemetrySequence,
+    ThirdParty, Timestamp, Weather,
 };
 
 use aprs_core::{DataType, Error, Packet};
@@ -36,9 +41,11 @@ pub fn decode(info: &[u8]) -> Result<Decoded<'_>, Error> {
         }
         DataType::Message => Ok(Decoded::Message(message::decode(info)?)),
         DataType::Object | DataType::Item => Ok(Decoded::Object(object::decode(info)?)),
-        DataType::Status => Ok(Decoded::Status(&info[1..])),
+        DataType::Status => Ok(Decoded::Status(status::decode(info)?)),
+        DataType::GridLocator => Ok(Decoded::Maidenhead(status::decode_grid(info)?)),
         DataType::Telemetry => Ok(Decoded::Telemetry(telemetry::decode(info)?)),
         DataType::Weather => Ok(Decoded::Weather(weather::decode(info)?)),
+        DataType::ThirdParty => Ok(Decoded::ThirdParty(thirdparty::decode(info)?)),
         DataType::MicECurrent | DataType::MicEOld => Err(Error::Unsupported),
         other => Ok(Decoded::Unsupported(other)),
     }
@@ -56,6 +63,16 @@ pub fn decode_packet<'a>(packet: &Packet<'a>) -> Result<Decoded<'a>, Error> {
     decode(packet.info)
 }
 
+/// Decode the inner payload of a third-party packet, routing Mic-E through the
+/// inner destination (which carries the Mic-E latitude).
+pub fn decode_third_party<'a>(tp: &ThirdParty<'a>) -> Result<Decoded<'a>, Error> {
+    let dt = DataType::from_byte(*tp.info.first().ok_or(Error::Empty)?);
+    if matches!(dt, DataType::MicECurrent | DataType::MicEOld) {
+        return Ok(Decoded::Position(mice::decode(tp.destination, tp.info)?));
+    }
+    decode(tp.info)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,7 +80,10 @@ mod tests {
     #[test]
     fn dispatches_status() {
         match decode(b">Hello world").unwrap() {
-            Decoded::Status(s) => assert_eq!(s, b"Hello world"),
+            Decoded::Status(s) => {
+                assert!(s.locator.is_none());
+                assert_eq!(s.text, b"Hello world");
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

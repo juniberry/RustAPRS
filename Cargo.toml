@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/aprs-core",
     "crates/aprs-decoders",
+    "crates/aprs-encoders",
     "crates/aprs-ax25",
     "crates/aprs-is",
     "crates/aprs-capture",

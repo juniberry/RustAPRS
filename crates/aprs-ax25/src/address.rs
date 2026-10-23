@@ -9,7 +9,7 @@
 //! Per the AX.25 2.2 specification, the reserved bits are set to 1, giving a
 //! base of `0x30` for the SSID octet.
 
-use aprs_core::address::{Address, Ssid, CALLSIGN_LEN};
+use aprs_core::address::{Address, CALLSIGN_LEN};
 
 /// Number of octets in an encoded AX.25 address.
 pub const ADDRESS_LEN: usize = CALLSIGN_LEN + 1;
@@ -27,7 +27,7 @@ pub fn encode_address(address: &Address, is_last: bool) -> [u8; ADDRESS_LEN] {
     for (i, &c) in address.callsign.iter().enumerate() {
         out[i] = c << 1;
     }
-    let mut ssid_octet = 0x30 | address.ssid.wire();
+    let mut ssid_octet = 0x30 | address.ssid;
     if is_last {
         ssid_octet |= H_BIT;
     }
@@ -49,10 +49,7 @@ pub fn decode_address(bytes: &[u8; ADDRESS_LEN]) -> Option<(Address, bool)> {
     let ssid_octet = bytes[CALLSIGN_LEN];
     let ssid = ssid_octet & 0x0F;
     let is_last = ssid_octet & H_BIT != 0;
-    let address = Address {
-        callsign,
-        ssid: Ssid::Numeric(ssid),
-    };
+    let address = Address { callsign, ssid };
     Some((address, is_last))
 }
 

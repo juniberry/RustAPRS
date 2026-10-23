@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use aprs_core::tnc2;
 use aprs_core::DataType;
-use aprs_decoders::{decode_packet, Decoded, PositionEncoding};
+use aprs_decoders::{decode_packet, decode_third_party, Decoded, PositionEncoding};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -29,6 +29,24 @@ enum Command {
         /// A single TNC2 packet to decode (reads stdin when omitted).
         packet: Option<String>,
     },
+    /// Encode a position report and print a TNC2 line.
+    Encode {
+        /// Source callsign.
+        #[arg(long, default_value = "N0CALL")]
+        callsign: String,
+        /// Latitude in decimal degrees.
+        #[arg(long)]
+        lat: f64,
+        /// Longitude in decimal degrees.
+        #[arg(long)]
+        lon: f64,
+        /// Symbol table + code (e.g. "/-").
+        #[arg(long, default_value = "/-")]
+        symbol: String,
+        /// Free-form comment.
+        #[arg(long, default_value = "")]
+        comment: String,
+    },
     /// Replay a corpus of captured TNC2 frames and report decode statistics.
     Audit {
         /// Directory (or single file) containing captured `.tnc2` frames.
@@ -43,6 +61,13 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { packet } => decode_cmd(packet),
+        Command::Encode {
+            callsign,
+            lat,
+            lon,
+            symbol,
+            comment,
+        } => encode_cmd(&callsign, lat, lon, &symbol, &comment),
         Command::Audit { path, examples } => audit_cmd(&path, examples),
     }
 }
@@ -92,6 +117,33 @@ fn decode_line(line: &[u8]) {
     }
 }
 
+fn encode_cmd(callsign: &str, lat: f64, lon: f64, symbol: &str, comment: &str) {
+    let sym = symbol.as_bytes();
+    if sym.len() < 2 {
+        eprintln!("symbol must be two characters (table + code), e.g. /-");
+        std::process::exit(1);
+    }
+
+    let mut out = [0u8; 256];
+    let n = match aprs_encoders::position::encode_uncompressed(
+        false,
+        lat,
+        lon,
+        sym[0],
+        sym[1],
+        comment.as_bytes(),
+        &mut out,
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("encode error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("{callsign}>APRS:{}", String::from_utf8_lossy(&out[..n]));
+}
+
 fn format_decoded(decoded: Decoded<'_>) -> String {
     match decoded {
         Decoded::Position(p) => {
@@ -112,6 +164,15 @@ fn format_decoded(decoded: Decoded<'_>) -> String {
             }
             if let Some(alt) = p.altitude_feet {
                 s.push_str(&format!(" alt={alt}ft"));
+            }
+            if let Some(phg) = p.phg {
+                s.push_str(&format!(
+                    " phg={}W/{}ft/{}dBi/{}°",
+                    phg.power_watts, phg.height_feet, phg.gain_dbi, phg.directivity_deg
+                ));
+            }
+            if let Some(r) = p.radio_range_miles {
+                s.push_str(&format!(" range={r}mi"));
             }
             if !p.comment.is_empty() {
                 s.push_str(&format!(" comment={}", String::from_utf8_lossy(p.comment)));
@@ -148,7 +209,25 @@ fn format_decoded(decoded: Decoded<'_>) -> String {
                 )
             }
         }
-        Decoded::Status(s) => format!("status: {}", String::from_utf8_lossy(s)),
+        Decoded::Status(s) => {
+            let mut out = String::from("status");
+            if let Some(m) = s.locator {
+                out.push_str(&format!(
+                    " [grid {}]",
+                    String::from_utf8_lossy(&m.grid[..m.precision as usize])
+                ));
+            }
+            if !s.text.is_empty() {
+                out.push_str(&format!(": {}", String::from_utf8_lossy(s.text)));
+            }
+            out
+        }
+        Decoded::Maidenhead(m) => format!(
+            "maidenhead {} ({:.5},{:.5})",
+            String::from_utf8_lossy(&m.grid[..m.precision as usize]),
+            m.coordinates.latitude,
+            m.coordinates.longitude
+        ),
         Decoded::Telemetry(t) => {
             let mut s = format!(
                 "telemetry seq={} analog={:?} digital={:08b}",
@@ -178,6 +257,17 @@ fn format_decoded(decoded: Decoded<'_>) -> String {
             }
             format!("weather {}", parts.join(" "))
         }
+        Decoded::ThirdParty(tp) => {
+            let inner = match decode_third_party(&tp) {
+                Ok(d) => format_decoded(d),
+                Err(e) => format!("<decode error: {e}>"),
+            };
+            format!(
+                "third-party origin={} -> {}",
+                String::from_utf8_lossy(tp.source),
+                inner
+            )
+        }
         Decoded::Unsupported(dt) => format!("unsupported type ({dt:?})"),
     }
 }
@@ -198,6 +288,8 @@ struct Stats {
     status: usize,
     telemetry: usize,
     weather: usize,
+    third_party: usize,
+    maidenhead: usize,
 
     unsupported: HashMap<DataType, usize>,
 
@@ -216,6 +308,8 @@ impl Stats {
             + self.status
             + self.telemetry
             + self.weather
+            + self.third_party
+            + self.maidenhead
     }
 
     fn unsupported_total(&self) -> usize {
@@ -260,6 +354,8 @@ impl Stats {
         println!("  status:                  {}", self.status);
         println!("  telemetry:               {}", self.telemetry);
         println!("  weather:                 {}", self.weather);
+        println!("  third-party:             {}", self.third_party);
+        println!("  maidenhead:              {}", self.maidenhead);
 
         if !self.unsupported.is_empty() {
             println!("\nunsupported by type:");
@@ -378,6 +474,8 @@ fn audit_file(path: &Path, stats: &mut Stats, max_examples: usize) {
             Ok(Decoded::Status(_)) => stats.status += 1,
             Ok(Decoded::Telemetry(_)) => stats.telemetry += 1,
             Ok(Decoded::Weather(_)) => stats.weather += 1,
+            Ok(Decoded::ThirdParty(_)) => stats.third_party += 1,
+            Ok(Decoded::Maidenhead(_)) => stats.maidenhead += 1,
             Ok(Decoded::Unsupported(dt)) => {
                 *stats.unsupported.entry(dt).or_insert(0) += 1;
                 if stats.unsupported_examples.len() < max_examples {

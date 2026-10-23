@@ -1,44 +1,22 @@
-//! AX.25 address representation.
+//! AX.25 address representation (strict RF form).
+//!
+//! An AX.25 address is a six-character callsign plus a 4-bit numeric SSID in
+//! the range `0..=15`. The callsign is space-padded on the right and, on the
+//! wire, each character is left-shifted one bit. The SSID is a separate 4-bit
+//! field, *not* stored as ASCII digits.
+//!
+//! This library targets native RF/AX.25. It does not model the more permissive
+//! APRS-IS identifier rules (3–9 character totals, 1–2 character alphanumeric
+//! SSIDs, gateway prefixes such as `ER-`/`IRLP-`). Such identifiers cannot be
+//! represented in a native AX.25 address and, on the air, must instead travel
+//! via third-party encapsulation.
 
 use core::fmt;
 
 /// Maximum length of a callsign (always six characters, space padded).
 pub const CALLSIGN_LEN: usize = 6;
 
-/// An SSID.
-///
-/// AX.25 uses a 4-bit numeric SSID (`0..=15`). APRS-IS additionally uses a
-/// single alphanumeric SSID (`-A` through `-Z`, and lowercase) to distinguish
-/// non-radio stations such as D-STAR/DMR/YSF gateways.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Ssid {
-    /// Numeric SSID (`0..=15`), the AX.25 wire format.
-    Numeric(u8),
-    /// Single alphanumeric SSID (an ASCII letter), APRS-IS convention.
-    Alphanumeric(u8),
-}
-
-impl Ssid {
-    /// The numeric value for AX.25 wire encoding. Alphanumeric SSIDs have no
-    /// wire representation and map to `0`.
-    pub const fn wire(self) -> u8 {
-        match self {
-            Ssid::Numeric(n) => n,
-            Ssid::Alphanumeric(_) => 0,
-        }
-    }
-}
-
-impl fmt::Display for Ssid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Ssid::Numeric(n) => write!(f, "{n}"),
-            Ssid::Alphanumeric(c) => write!(f, "{}", *c as char),
-        }
-    }
-}
-
-/// An AX.25 address: a six-character callsign plus an SSID.
+/// An AX.25 address: a six-character callsign plus a 4-bit numeric SSID.
 ///
 /// The callsign is stored as six uppercase ASCII bytes, space padded on the
 /// right. This mirrors the on-air AX.25 encoding and keeps the type trivially
@@ -46,13 +24,16 @@ impl fmt::Display for Ssid {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Address {
     pub callsign: [u8; CALLSIGN_LEN],
-    pub ssid: Ssid,
+    /// Numeric SSID in the range `0..=15`.
+    pub ssid: u8,
 }
 
 impl Address {
     /// Create an address from a callsign and a numeric SSID (`0..=15`).
     ///
-    /// The callsign is uppercased and space-padded to six characters.
+    /// The callsign is uppercased and space-padded to six characters. Returns
+    /// `None` if the SSID exceeds 15, the callsign exceeds six characters, or
+    /// the callsign contains a non-alphanumeric character.
     pub const fn new(callsign: &[u8], ssid: u8) -> Option<Self> {
         if ssid > 15 || callsign.len() > CALLSIGN_LEN {
             return None;
@@ -67,10 +48,7 @@ impl Address {
             cs[i] = c.to_ascii_uppercase();
             i += 1;
         }
-        Some(Address {
-            callsign: cs,
-            ssid: Ssid::Numeric(ssid),
-        })
+        Some(Address { callsign: cs, ssid })
     }
 
     /// Return the callsign as a byte slice with trailing space padding removed.
@@ -82,9 +60,8 @@ impl Address {
         &self.callsign[..end]
     }
 
-    /// Parse a `CALLSIGN`, `CALLSIGN-N`, or `CALLSIGN-X` field from bytes.
-    ///
-    /// The SSID may be numeric (`0..=15`) or a single alphanumeric character.
+    /// Parse a `CALLSIGN` or `CALLSIGN-N` field from bytes, where `N` is a
+    /// numeric SSID in the range `0..=15`.
     pub fn parse(input: &[u8]) -> Option<Self> {
         if input.is_empty() {
             return None;
@@ -96,24 +73,20 @@ impl Address {
         let callsign = parse_callsign(cs)?;
 
         let ssid = match ssid {
-            None => Ssid::Numeric(0),
+            None => 0,
             Some(b"") => return None,
             Some(s) => {
-                if s.len() == 1 && s[0].is_ascii_alphabetic() {
-                    Ssid::Alphanumeric(s[0].to_ascii_uppercase())
-                } else {
-                    let mut n = 0u8;
-                    for &d in s {
-                        if !d.is_ascii_digit() {
-                            return None;
-                        }
-                        n = n.checked_mul(10)?.checked_add(d - b'0')?;
-                    }
-                    if n > 15 {
+                let mut n = 0u8;
+                for &d in s {
+                    if !d.is_ascii_digit() {
                         return None;
                     }
-                    Ssid::Numeric(n)
+                    n = n.checked_mul(10)?.checked_add(d - b'0')?;
                 }
+                if n > 15 {
+                    return None;
+                }
+                n
             }
         };
 
@@ -139,7 +112,7 @@ fn parse_callsign(input: &[u8]) -> Option<[u8; CALLSIGN_LEN]> {
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(core::str::from_utf8(self.callsign_trimmed()).unwrap_or(""))?;
-        if !matches!(self.ssid, Ssid::Numeric(0)) {
+        if self.ssid != 0 {
             write!(f, "-{}", self.ssid)?;
         }
         Ok(())
@@ -159,22 +132,21 @@ mod tests {
     #[test]
     fn parses_bare_callsign() {
         let a = Address::parse(b"N0CALL").unwrap();
-        assert_eq!(a.ssid, Ssid::Numeric(0));
+        assert_eq!(a.ssid, 0);
         assert_eq!(a.callsign_trimmed(), b"N0CALL");
     }
 
     #[test]
     fn parses_numeric_ssid() {
         let a = Address::parse(b"N0CALL-9").unwrap();
-        assert_eq!(a.ssid, Ssid::Numeric(9));
+        assert_eq!(a.ssid, 9);
         assert_eq!(a.callsign_trimmed(), b"N0CALL");
     }
 
     #[test]
-    fn parses_alphanumeric_ssid() {
-        let a = Address::parse(b"K8ETN-B").unwrap();
-        assert_eq!(a.ssid, Ssid::Alphanumeric(b'B'));
-        assert_eq!(a.callsign_trimmed(), b"K8ETN");
+    fn parses_zero_ssid() {
+        let a = Address::parse(b"N0CALL-0").unwrap();
+        assert_eq!(a.ssid, 0);
     }
 
     #[test]
@@ -187,8 +159,21 @@ mod tests {
     #[test]
     fn rejects_bad_ssid() {
         assert!(Address::parse(b"N0CALL-16").is_none());
+        assert!(Address::parse(b"N0CALL-40").is_none());
         assert!(Address::parse(b"N0CALL-").is_none());
-        assert!(Address::parse(b"N0CALL-AB").is_none());
+    }
+
+    #[test]
+    fn rejects_alphanumeric_ssid() {
+        // Alphanumeric SSIDs are an APRS-IS extension, not valid on RF.
+        assert!(Address::parse(b"N0CALL-A").is_none());
+        assert!(Address::parse(b"N0CALL-B").is_none());
+    }
+
+    #[test]
+    fn rejects_oversized_callsign() {
+        assert!(Address::parse(b"N0CALLS").is_none());
+        assert!(Address::parse(b"WINLINK").is_none());
     }
 
     #[test]

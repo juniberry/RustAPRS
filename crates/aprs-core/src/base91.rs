@@ -33,6 +33,23 @@ pub fn base91_decode(digits: &[u8]) -> Option<u32> {
 /// The full range of a 4-digit base-91 value: `91^4 - 1`.
 pub const BASE91_4_MAX: u32 = 68_574_960;
 
+/// Encode a value as exactly `digits` base-91 characters (big-endian, most
+/// significant digit first), padding with `!` (value 0) on the left.
+///
+/// Writes into `out` and returns the number of characters written (`digits`),
+/// or `None` if `out` is too small. Values larger than `91^digits - 1` are
+/// truncated to the low `digits` digits.
+pub fn base91_encode_fixed(mut value: u32, digits: usize, out: &mut [u8]) -> Option<usize> {
+    if out.len() < digits {
+        return None;
+    }
+    for i in (0..digits).rev() {
+        out[i] = (value % BASE91_ALPHABET_SIZE) as u8 + 0x21;
+        value /= BASE91_ALPHABET_SIZE;
+    }
+    Some(digits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +78,27 @@ mod tests {
     fn overflow_is_none() {
         // 8 digits of the highest value would overflow u32.
         assert_eq!(base91_decode(b"{{{{{{{{"), None);
+    }
+
+    #[test]
+    fn encode_fixed_roundtrip() {
+        let mut out = [0u8; 4];
+        assert_eq!(base91_encode_fixed(0, 4, &mut out), Some(4));
+        assert_eq!(&out, b"!!!!");
+        assert_eq!(base91_decode(&out), Some(0));
+
+        // 20427156 (the spec's longitude example) encodes to `<*e7`.
+        let mut out = [0u8; 4];
+        assert_eq!(base91_encode_fixed(20_427_156, 4, &mut out), Some(4));
+        assert_eq!(&out, b"<*e7");
+        assert_eq!(base91_decode(&out), Some(20_427_156));
+    }
+
+    #[test]
+    fn encode_fixed_pads_left() {
+        let mut out = [0u8; 4];
+        base91_encode_fixed(1, 4, &mut out);
+        assert_eq!(&out, b"!!!\"");
+        assert_eq!(base91_decode(&out), Some(1));
     }
 }

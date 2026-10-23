@@ -13,4 +13,5 @@ path = "src/main.rs"
 [dependencies]
 aprs-core = { path = "../aprs-core" }
 aprs-decoders = { path = "../aprs-decoders" }
+aprs-encoders = { path = "../aprs-encoders" }
 clap = { version = "4", features = ["derive"] }

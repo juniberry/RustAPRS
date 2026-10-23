@@ -19,6 +19,8 @@ pub enum Error {
     InvalidNumber,
     /// A base-91 encoded value contained an invalid character.
     InvalidBase91,
+    /// The output buffer was too small to hold the encoded data.
+    BufferTooSmall,
     /// The frame was recognized but this decoder does not support it (yet).
     Unsupported,
 }
@@ -33,6 +35,7 @@ impl fmt::Display for Error {
             Error::InvalidCoordinate => write!(f, "coordinate out of range"),
             Error::InvalidNumber => write!(f, "invalid numeric field"),
             Error::InvalidBase91 => write!(f, "invalid base-91 character"),
+            Error::BufferTooSmall => write!(f, "output buffer too small"),
             Error::Unsupported => write!(f, "recognized but unsupported"),
         }
     }

@@ -15,6 +15,17 @@ pub struct Coordinates {
     pub longitude: f64,
 }
 
+/// A Maidenhead grid locator (grid square).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Maidenhead {
+    /// Uppercase grid-square characters (4 or 6), space-padded on the right.
+    pub grid: [u8; 6],
+    /// Number of significant characters (4 or 6).
+    pub precision: u8,
+    /// Center of the grid square in decimal degrees.
+    pub coordinates: Coordinates,
+}
+
 /// APRS symbol table identifier.
 ///
 /// The two standard tables are `/` (primary) and `\` (alternate), but the
@@ -73,6 +84,60 @@ pub enum PositionEncoding {
     MicE,
 }
 
+/// Power/Height/Gain/Directivity information from a `PHGphgd` data extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Phg {
+    /// Transmitter power in watts (`p` squared).
+    pub power_watts: u16,
+    /// Effective antenna height above average terrain, in feet (`10 * 2^h`).
+    pub height_feet: u32,
+    /// Antenna gain in dBi (`g`).
+    pub gain_dbi: u8,
+    /// Directivity in degrees (`d` × 45).
+    pub directivity_deg: u16,
+}
+
+/// NMEA source of a compressed position's data (§9 Compression Type byte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NmeaSource {
+    Other,
+    Gll,
+    Gga,
+    Rmc,
+}
+
+/// Origin of a compressed position (§9 Compression Type byte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionOrigin {
+    /// Compressed by unspecified means.
+    Compressed,
+    /// TNC BText beacon.
+    TncBText,
+    /// Software (DOS/Mac/Win/+SA).
+    Software,
+    /// Reserved.
+    Tbd,
+    /// KPC3 TNC.
+    Kpc3,
+    /// Pico.
+    Pico,
+    /// Other tracker.
+    OtherTracker,
+    /// Digipeater conversion.
+    Digipeater,
+}
+
+/// Decoded compression-type (`T`) byte of a compressed position (§9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompressionType {
+    /// True for a current GPS fix, false for an old (last) fix.
+    pub gps_fix_current: bool,
+    /// The NMEA sentence type the data originated from.
+    pub nmea_source: NmeaSource,
+    /// What performed the compression.
+    pub origin: CompressionOrigin,
+}
+
 /// A decoded position report.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Position<'a> {
@@ -88,12 +153,21 @@ pub struct Position<'a> {
     pub ambiguity: u8,
     /// True when the originating station supports APRS messaging.
     pub messaging: bool,
-    /// Course over ground in degrees, when available (Mic-E / compressed).
+    /// Course over ground in degrees, when available (Mic-E / compressed / CSE).
     pub course: Option<u16>,
     /// Speed in knots, when available.
     pub speed_knots: Option<u16>,
     /// Altitude in feet, when available.
     pub altitude_feet: Option<i32>,
+    /// Power/height/gain/directivity, when a `PHG` extension is present.
+    pub phg: Option<Phg>,
+    /// Pre-calculated radio range in miles, when an `RNG` extension is present.
+    pub radio_range_miles: Option<u16>,
+    /// Decoded compression-type byte, for compressed positions with a meaningful
+    /// `c` byte (None otherwise).
+    pub compression_type: Option<CompressionType>,
+    /// Maidenhead grid locator, when present (Mic-E status text).
+    pub maidenhead: Option<Maidenhead>,
 }
 
 /// A decoded APRS message.
@@ -182,16 +256,48 @@ pub struct Weather {
     pub rain_24h_hundredths_in: Option<u16>,
 }
 
+/// A decoded third-party encapsulated packet (`}`).
+///
+/// Third-party encapsulation carries a complete APRS packet from another
+/// network (e.g. APRS-IS) inside the information field of an RF frame. The
+/// outer frame uses a valid AX.25 source (the gateway); the *logical* origin is
+/// the inner source, which is a 1–9 character printable-ASCII string that need
+/// not be a valid AX.25 address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThirdParty<'a> {
+    /// Original source address (the logical origin; a printable-ASCII string).
+    pub source: &'a [u8],
+    /// Original destination (device/system identifier, or Mic-E latitude).
+    pub destination: &'a [u8],
+    /// Original digipeater via path (raw, comma-separated).
+    pub path: &'a [u8],
+    /// The encapsulated original information field, to be decoded recursively.
+    pub info: &'a [u8],
+}
+
+/// A decoded status report (`>`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Status<'a> {
+    /// Maidenhead grid locator, when the report begins with one.
+    pub locator: Option<Maidenhead>,
+    /// The remaining status text (after the `>` and any locator).
+    pub text: &'a [u8],
+}
+
 /// The result of decoding a packet's information field.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Decoded<'a> {
     Position(Position<'a>),
     Message(Message<'a>),
     Object(Object<'a>),
-    /// Status text (the bytes after the `>` identifier).
-    Status(&'a [u8]),
+    /// Status report (`>`).
+    Status(Status<'a>),
     Telemetry(Telemetry<'a>),
     Weather(Weather),
+    /// Third-party encapsulated traffic (`}`).
+    ThirdParty(ThirdParty<'a>),
+    /// Maidenhead grid locator beacon (`[`, obsolete).
+    Maidenhead(Maidenhead),
     /// Recognized but not yet decoded by a dedicated decoder.
     Unsupported(DataType),
 }

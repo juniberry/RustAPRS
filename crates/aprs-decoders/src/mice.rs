@@ -41,9 +41,11 @@
 //! ```
 
 use aprs_core::address::CALLSIGN_LEN;
+use aprs_core::base91::base91_decode;
 use aprs_core::Error;
 
-use crate::decoded::{Coordinates, Position, PositionEncoding, SymbolTable};
+use crate::decoded::{Coordinates, Maidenhead, Position, PositionEncoding, SymbolTable};
+use crate::maidenhead;
 
 /// Decode a Mic-E position from the raw destination bytes and the information
 /// field (including the leading data-type byte).
@@ -139,9 +141,9 @@ pub fn decode<'a>(destination_raw: &[u8], info: &'a [u8]) -> Result<Position<'a>
     let symbol_code = body[6];
     let symbol_table = SymbolTable::from_byte(body[7]);
 
-    // The remainder is status text, possibly prefixed with a device/messaging
-    // marker (e.g. `, ', >, ]) and possibly containing an altitude string.
-    let comment = &body[8..];
+    // The remainder is status text: an optional device/messaging prefix, an
+    // optional base-91 altitude, an optional Maidenhead locator, and free text.
+    let (comment, messaging, altitude_feet, maidenhead) = parse_status_text(&body[8..]);
 
     Ok(Position {
         coordinates: Coordinates {
@@ -154,11 +156,64 @@ pub fn decode<'a>(destination_raw: &[u8], info: &'a [u8]) -> Result<Position<'a>
         comment,
         timestamp: None,
         ambiguity,
-        messaging: false, // TODO: derive from status-text prefix
+        messaging,
         course: Some(course as u16),
         speed_knots: Some(speed as u16),
-        altitude_feet: None, // TODO: parse base-91 altitude from status text
+        altitude_feet,
+        phg: None,
+        radio_range_miles: None,
+        compression_type: None,
+        maidenhead,
     })
+}
+
+/// Parse the Mic-E status text (everything after the symbol table identifier).
+///
+/// Returns `(comment, messaging, altitude_feet, maidenhead)`. The leading
+/// device/messaging prefix, the optional `xxx}` base-91 altitude, and the
+/// optional Maidenhead locator are removed from the comment.
+fn parse_status_text(text: &[u8]) -> (&[u8], bool, Option<i32>, Option<Maidenhead>) {
+    let mut rest = text;
+    let mut messaging = false;
+
+    // Device/messaging prefix: `` ` `` = messaging capable, `'` = not capable,
+    // `>`/`]` = Kenwood (no messaging indication).
+    if let Some(&prefix) = rest.first() {
+        match prefix {
+            b'`' => {
+                messaging = true;
+                rest = &rest[1..];
+            }
+            b'\'' => {
+                rest = &rest[1..];
+            }
+            b'>' | b']' => {
+                rest = &rest[1..];
+            }
+            _ => {}
+        }
+    }
+
+    // Altitude: three base-91 characters followed by `}`, in meters relative to
+    // 10 km below mean sea level.
+    let mut altitude_feet = None;
+    if rest.len() >= 4 && rest[3] == b'}' {
+        if let Some(v) = base91_decode(&rest[..3]) {
+            let meters = v as i32 - 10_000;
+            altitude_feet = Some((meters as f64 * 3.280_84) as i32);
+            rest = &rest[4..];
+        }
+    }
+
+    // Maidenhead locator: a 4- or 6-character grid square, optionally followed
+    // by a symbol (`/G`).
+    let mut maidenhead = None;
+    if let Some((m, r)) = maidenhead::parse(rest) {
+        maidenhead = Some(m);
+        rest = r;
+    }
+
+    (rest, messaging, altitude_feet, maidenhead)
 }
 
 /// Decode a single destination-address byte into a latitude digit.
@@ -239,5 +294,36 @@ mod tests {
         let p = decode(dest, info).unwrap();
         assert_eq!(p.ambiguity, 2);
         assert!((p.coordinates.latitude - 44.5166666).abs() < 1e-5);
+    }
+
+    #[test]
+    fn status_text_messaging_and_altitude() {
+        // Backtick prefix = messaging capable; `"4T}` = 200 feet altitude.
+        let dest = b"S32UVT";
+        let info = b"'(_fn\"Oj/`\"4T}";
+        let p = decode(dest, info).unwrap();
+        assert!(p.messaging);
+        assert_eq!(p.altitude_feet, Some(200));
+        assert!(p.comment.is_empty());
+    }
+
+    #[test]
+    fn status_text_no_messaging() {
+        // Apostrophe prefix = not messaging capable.
+        let dest = b"S32UVT";
+        let info = b"'(_fn\"Oj/'\"4T}";
+        let p = decode(dest, info).unwrap();
+        assert!(!p.messaging);
+        assert_eq!(p.altitude_feet, Some(200));
+    }
+
+    #[test]
+    fn status_text_kenwood_prefix() {
+        // Kenwood `>` prefix, free-text comment preserved.
+        let dest = b"S32UVT";
+        let info = b"'(_fn\"Oj/>Hello";
+        let p = decode(dest, info).unwrap();
+        assert!(!p.messaging);
+        assert_eq!(p.comment, b"Hello");
     }
 }

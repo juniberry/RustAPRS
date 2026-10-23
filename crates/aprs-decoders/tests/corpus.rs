@@ -83,8 +83,8 @@ fn soak_no_panics_and_high_recognition() {
 
     assert_eq!(total, 20, "corpus should contain 20 packets");
     // Every v1 data type except the intentionally-unsupported ones
-    // (capability, query, grid locator, third-party, user-defined) must decode.
+    // (capability, query, user-defined) must decode.
     assert_eq!(errors, 0, "no packet should produce a decode error");
-    assert_eq!(unsupported, 5, "five types are not yet decoded");
+    assert_eq!(unsupported, 3, "three types are not yet decoded");
     assert_eq!(recognized, total - unsupported);
 }
