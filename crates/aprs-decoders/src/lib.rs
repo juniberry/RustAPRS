@@ -21,9 +21,9 @@ pub mod thirdparty;
 pub mod weather;
 
 pub use decoded::{
-    CompressionOrigin, CompressionType, Coordinates, Decoded, Maidenhead, Message, NmeaSource,
-    Object, Phg, Position, PositionEncoding, Status, SymbolTable, Telemetry, TelemetrySequence,
-    ThirdParty, Timestamp, Weather,
+    CompressionOrigin, CompressionType, Coordinates, Decoded, Maidenhead, Message, MicEMessage,
+    NmeaSource, Object, Phg, Position, PositionEncoding, Status, SymbolTable, Telemetry,
+    TelemetrySequence, ThirdParty, Timestamp, Weather,
 };
 
 use aprs_core::{DataType, Error, Packet};
