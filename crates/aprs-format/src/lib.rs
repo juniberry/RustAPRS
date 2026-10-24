@@ -37,6 +37,9 @@ pub fn format_decoded(decoded: Decoded<'_>) -> String {
             if let Some(r) = p.radio_range_miles {
                 s.push_str(&format!(" range={r}mi"));
             }
+            if let Some(m) = p.mic_e_message {
+                s.push_str(&format!(" mic-e={}", m.name()));
+            }
             if p.messaging {
                 s.push_str(" messaging");
             }

@@ -198,7 +198,8 @@ classDiagram
 `Decoded` is the sum type returned by `decode` / `decode_packet`; each variant
 wraps the corresponding struct. `Position` is the richest payload — it carries
 compression/ambiguity/timestamp metadata alongside the coordinate, and for
-Mic-E additionally the messaging capability and device identifier suffix.
+Mic-E additionally the position comment (message bits), messaging capability
+and device identifier suffix.
 
 ## Design goals
 
@@ -244,7 +245,9 @@ Mic-E additionally the messaging capability and device identifier suffix.
 
 Uncompressed/compressed/Mic-E positions, messages, objects/items, status,
 telemetry, and positionless weather — each with a round-trip test against the
-decoder.
+decoder. Mic-E covers every position comment (standard, custom, emergency),
+position ambiguity, altitude and status text; golden vectors from an
+independent implementation live in `crates/aprs-encoders/tests/mice_vectors.rs`.
 
 ## Usage
 

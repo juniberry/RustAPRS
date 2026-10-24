@@ -23,7 +23,9 @@
 //! | `0`-`9` | 0–9 | "south/east/+0" or comment bit 0 |
 //! | `A`-`J` | 0–9 | comment bit 1 (Custom) |
 //! | `P`-`Y` | 0–9 | "north/west/+100" or comment bit 1 (Std) |
-//! | `K`,`L`,`Z` | (space) | position ambiguity |
+//! | `K`,`L`,`Z` | (space) | position ambiguity (`K` custom 1, `L` 0, `Z` std 1) |
+//!
+//! `A`–`K` are only valid in bytes 0–2.
 //!
 //! # Information field
 //!
@@ -44,7 +46,9 @@ use aprs_core::address::CALLSIGN_LEN;
 use aprs_core::base91::base91_decode;
 use aprs_core::Error;
 
-use crate::decoded::{Coordinates, Maidenhead, Position, PositionEncoding, SymbolTable};
+use crate::decoded::{
+    Coordinates, Maidenhead, MicEMessage, Position, PositionEncoding, SymbolTable,
+};
 use crate::maidenhead;
 
 /// Decode a Mic-E position from the raw destination bytes and the information
@@ -60,13 +64,28 @@ pub fn decode<'a>(destination_raw: &[u8], info: &'a [u8]) -> Result<Position<'a>
     let dest = &destination_raw[..CALLSIGN_LEN];
 
     // --- Latitude from the destination address ---
-    // 'K', 'L' and 'Z' encode a blanked (ambiguous) digit.
+    // 'K', 'L' and 'Z' encode a blanked (ambiguous) digit; 'A'-'K' (custom
+    // message bits) are not used in bytes 3-5.
+    if dest[3..].iter().any(|c| matches!(c, b'A'..=b'K')) {
+        return Err(Error::InvalidCharacter);
+    }
     let (d0, b0) = lat_digit(dest[0])?;
     let (d1, b1) = lat_digit(dest[1])?;
     let (d2, b2) = lat_digit(dest[2])?;
     let (d3, b3) = lat_digit(dest[3])?;
     let (d4, b4) = lat_digit(dest[4])?;
     let (d5, b5) = lat_digit(dest[5])?;
+
+    // --- Position comment from the message bits in bytes 0-2 ---
+    let mut bits = 0u8;
+    let (mut standard, mut custom) = (false, false);
+    for &c in &dest[..3] {
+        let (std_one, custom_one) = (matches!(c, b'P'..=b'Z'), matches!(c, b'A'..=b'K'));
+        bits = bits << 1 | (std_one || custom_one) as u8;
+        standard |= std_one;
+        custom |= custom_one;
+    }
+    let mic_e_message = MicEMessage::from_bits(bits, standard, custom);
 
     let lat_deg = (d0 as u16 * 10 + d1 as u16) as f64;
     let lat_min = (d2 as u16 * 10 + d3 as u16) as f64;
@@ -105,7 +124,16 @@ pub fn decode<'a>(destination_raw: &[u8], info: &'a [u8]) -> Result<Position<'a>
     if lon_min >= 60 {
         lon_min -= 60;
     }
-    let lon_hund = (body[2] as i32) - 28;
+    let mut lon_hund = (body[2] as i32) - 28;
+    // The latitude's ambiguity applies to the longitude too: its same
+    // trailing digits are ignored (§10 "Mic-E Position Ambiguity").
+    match ambiguity {
+        0 => {}
+        1 => lon_hund -= lon_hund % 10,
+        2 => lon_hund = 0,
+        3 => (lon_min, lon_hund) = (lon_min - lon_min % 10, 0),
+        _ => (lon_min, lon_hund) = (0, 0),
+    }
 
     let mut longitude = lon_deg as f64 + (lon_min as f64 + lon_hund as f64 / 100.0) / 60.0;
     if west {
@@ -159,13 +187,15 @@ pub fn decode<'a>(destination_raw: &[u8], info: &'a [u8]) -> Result<Position<'a>
         ambiguity,
         messaging: status.messaging,
         device: status.device,
-        course: Some(course as u16),
+        // 0 = unknown or indefinite course; 360 = due north.
+        course: (course != 0).then_some(course as u16),
         speed_knots: Some(speed as u16),
         altitude_feet: status.altitude_feet,
         phg: None,
         radio_range_miles: None,
         compression_type: None,
         maidenhead: status.maidenhead,
+        mic_e_message: Some(mic_e_message),
     })
 }
 
@@ -186,6 +216,10 @@ struct StatusText<'a> {
 fn parse_status_text(text: &[u8]) -> StatusText<'_> {
     let mut rest = text;
     let mut messaging = false;
+    let prefix = rest
+        .first()
+        .copied()
+        .filter(|c| matches!(c, b'`' | b'\'' | b'>' | b']'));
 
     // Device/messaging prefix: `` ` `` = messaging capable, `'` = not capable,
     // `>`/`]` = Kenwood (no messaging indication).
@@ -210,8 +244,10 @@ fn parse_status_text(text: &[u8]) -> StatusText<'_> {
     let mut altitude_feet = None;
     if rest.len() >= 4 && rest[3] == b'}' {
         if let Some(v) = base91_decode(&rest[..3]) {
-            let meters = v as i32 - 10_000;
-            altitude_feet = Some((meters as f64 * 3.280_84) as i32);
+            // Meters to feet, rounded to the nearest foot.
+            let meters = v as i64 - 10_000;
+            let half = if meters < 0 { -1524 } else { 1524 };
+            altitude_feet = Some(((meters * 10_000 + half) / 3048) as i32);
             rest = &rest[4..];
         }
     }
@@ -224,8 +260,12 @@ fn parse_status_text(text: &[u8]) -> StatusText<'_> {
         rest = r;
     }
 
-    // Device identifier suffix (e.g. `|3`, `_0`, `=`).
-    let (comment, device) = strip_device_suffix(rest);
+    // Device identifier suffix (e.g. `|3`, `_0`, `=`), only after a device
+    // prefix: plain text may end in `=`, `^` or `&` too.
+    let (comment, device) = match prefix {
+        Some(p) => strip_device_suffix(p, rest),
+        None => (rest, None),
+    };
 
     StatusText {
         comment,
@@ -243,14 +283,15 @@ const DEVICE_SUFFIXES_2: [&[u8]; 5] = [b"_(", b"_0", b"_3", b"|3", b"|4"];
 const DEVICE_SUFFIXES_1: [&[u8]; 3] = [b"=", b"^", b"&"];
 
 /// Strip a known device identifier suffix from the end of the status text,
-/// returning the remaining comment and the device bytes (or `None`).
-fn strip_device_suffix(text: &[u8]) -> (&[u8], Option<&[u8]>) {
-    for suffix in DEVICE_SUFFIXES_2 {
-        if text.ends_with(suffix) {
-            return (&text[..text.len() - suffix.len()], Some(suffix));
-        }
-    }
-    for suffix in DEVICE_SUFFIXES_1 {
+/// returning the remaining comment and the device bytes (or `None`). The
+/// suffix goes with the prefix: two characters after `` ` `` or `'`, one
+/// (Kenwood) after `>` or `]`.
+fn strip_device_suffix(prefix: u8, text: &[u8]) -> (&[u8], Option<&[u8]>) {
+    let suffixes: &[&[u8]] = match prefix {
+        b'`' | b'\'' => &DEVICE_SUFFIXES_2,
+        _ => &DEVICE_SUFFIXES_1,
+    };
+    for &suffix in suffixes {
         if text.ends_with(suffix) {
             return (&text[..text.len() - suffix.len()], Some(suffix));
         }
@@ -379,5 +420,78 @@ mod tests {
         assert_eq!(p.altitude_feet, Some(200));
         assert_eq!(p.device, Some(&b"|3"[..]));
         assert_eq!(p.comment, b"hello");
+    }
+
+    #[test]
+    fn message_bits() {
+        let info: &[u8] = b"`(_fn\"Oj/";
+        for (dest, m) in [
+            (&b"S32UVT"[..], MicEMessage::Returning), // §10 example: 1/0/0
+            (b"SSRUVT", MicEMessage::OffDuty),
+            (b"33RUVT", MicEMessage::Priority),
+            (b"332UVT", MicEMessage::Emergency),
+            (b"D3CUVT", MicEMessage::Custom(2)), // F2D-style 1/0/1 custom
+            (b"KDKUVT", MicEMessage::Custom(0)),
+            (b"S3CUVT", MicEMessage::Unknown), // standard and custom 1s
+        ] {
+            assert_eq!(
+                decode(dest, info).unwrap().mic_e_message,
+                Some(m),
+                "{dest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_characters_only_in_the_first_three_bytes() {
+        let info: &[u8] = b"`(_fn\"Oj/";
+        for dest in [b"S32EVT", b"S32UFT", b"S32UVK"] {
+            assert_eq!(decode(dest, info), Err(Error::InvalidCharacter), "{dest:?}");
+        }
+    }
+
+    #[test]
+    fn course_zero_is_unknown() {
+        // SP 'l' (0 tens, the other encoding), DC 0x1c, SE 0x1c: 0 knots, 0 deg.
+        let p = decode(b"S32UVT", b"`(_fl\x1c\x1cj/").unwrap();
+        assert_eq!((p.speed_knots, p.course), (Some(0), None));
+        let p = decode(b"S32UVT", b"`(_fl\x1fXj/").unwrap(); // 360
+        assert_eq!(p.course, Some(360));
+    }
+
+    #[test]
+    fn device_suffix_needs_its_prefix() {
+        // Ordinary text may end in '=', '^' or '&'; only a device prefix makes
+        // it a suffix (Kenwood TH-D72 "> ... =", TinyTrack "' ... |3").
+        let p = decode(b"S32UVT", b"`(_fn\"Oj/QRV 146.52=").unwrap();
+        assert_eq!((p.comment, p.device), (&b"QRV 146.52="[..], None));
+        let p = decode(b"S32UVT", b"`(_fn\"Oj/hi ^").unwrap();
+        assert_eq!(p.comment, b"hi ^");
+        let p = decode(b"S32UVT", b"`(_fn\"Oj/>hi=").unwrap();
+        assert_eq!((p.comment, p.device), (&b"hi"[..], Some(&b"="[..])));
+        let p = decode(b"S32UVT", b"`(_fn\"Oj/>hi|3").unwrap();
+        assert_eq!((p.comment, p.device), (&b"hi|3"[..], None));
+    }
+
+    #[test]
+    fn ambiguity_applies_to_longitude() {
+        // §10: T4SQZZ with (_f: "the longitude will be 112 degrees 7 minutes".
+        let p = decode(b"T4SQZZ", b"`(_fn\"Oj/").unwrap();
+        assert!(
+            (p.coordinates.longitude + (112.0 + 7.0 / 60.0)).abs() < 1e-9,
+            "{}",
+            p.coordinates.longitude
+        );
+        let p = decode(b"T4SZZZ", b"`(_fn\"Oj/").unwrap();
+        assert!((p.coordinates.longitude + 112.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn altitude_rounds_to_the_nearest_foot() {
+        // 2 m = 6.56 ft: 7 (truncation gave 6); -1 m = -3.28 ft: -3.
+        let p = decode(b"S32UVT", b"`(_fn\"Oj/\"3t}").unwrap();
+        assert_eq!(p.altitude_feet, Some(7));
+        let p = decode(b"S32UVT", b"`(_fn\"Oj/\"3q}").unwrap();
+        assert_eq!(p.altitude_feet, Some(-3));
     }
 }

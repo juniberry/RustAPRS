@@ -166,6 +166,7 @@ pub fn decode_uncompressed(
         radio_range_miles: ext.radio_range_miles,
         compression_type: None,
         maidenhead: None,
+        mic_e_message: None,
     })
 }
 
@@ -259,6 +260,7 @@ pub fn decode_compressed(
         radio_range_miles,
         compression_type,
         maidenhead: None,
+        mic_e_message: None,
     })
 }
 

@@ -5,6 +5,7 @@
 //! allocation-free.
 
 use aprs_core::DataType;
+pub use aprs_core::MicEMessage;
 
 /// A geographic coordinate in decimal degrees.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,6 +172,8 @@ pub struct Position<'a> {
     pub compression_type: Option<CompressionType>,
     /// Maidenhead grid locator, when present (Mic-E status text).
     pub maidenhead: Option<Maidenhead>,
+    /// Mic-E position comment (message bits A/B/C), for Mic-E positions.
+    pub mic_e_message: Option<MicEMessage>,
 }
 
 /// A decoded APRS message.
